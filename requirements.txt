@@ -3,6 +3,4 @@ beautifulsoup4
 pytest
 flask
 bcrypt
-flask-limiter
 gunicorn
-python-dotenv
