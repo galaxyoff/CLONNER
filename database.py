@@ -26,6 +26,13 @@ def init_db():
         )
     ''')
     
+    # Verificar se a coluna access_expires existe (migração)
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'access_expires' not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN access_expires TEXT DEFAULT NULL")
+        print("✓ Coluna access_expires adicionada ao banco de dados")
+    
     conn.commit()
     conn.close()
 

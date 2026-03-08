@@ -22,7 +22,7 @@ from rewriter import rewrite_links
 
 
 # Configuracao do servidor (pode ser via variavel de ambiente ou perguntar ao usuario)
-SERVER_URL = os.environ.get('ESTAGIARIO_SERVER', '').rstrip('/')
+SERVER_URL = os.environ.get('ESTAGIARIO_SERVER', 'https://clonner-11.onrender.com').rstrip('/')
 
 
 # ANSI color codes
