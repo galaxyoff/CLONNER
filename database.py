@@ -21,7 +21,8 @@ def init_db():
             password_hash TEXT NOT NULL,
             is_admin INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
-            last_login TEXT
+            last_login TEXT,
+            access_expires TEXT DEFAULT NULL
         )
     ''')
     
@@ -41,10 +42,16 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
 
-def criar_usuario(username: str, password: str, is_admin: bool = False) -> dict:
+def criar_usuario(username: str, password: str, is_admin: bool = False, access_expires: str = None) -> dict:
     """
     Cria um novo usuário no banco de dados.
     Retorna dict com 'success' e 'message'.
+    
+    Args:
+        username: Nome de usuário
+        password: Senha do usuário
+        is_admin: Se é administrador
+        access_expires: Data de expiração do acesso (formato: YYYY-MM-DD)
     """
     try:
         conn = sqlite3.connect(DATABASE_PATH)
@@ -62,8 +69,8 @@ def criar_usuario(username: str, password: str, is_admin: bool = False) -> dict:
         # Insere novo usuário
         created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute(
-            'INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)',
-            (username, password_hash, 1 if is_admin else 0, created_at)
+            'INSERT INTO users (username, password_hash, is_admin, created_at, access_expires) VALUES (?, ?, ?, ?, ?)',
+            (username, password_hash, 1 if is_admin else 0, created_at, access_expires)
         )
         
         conn.commit()
@@ -112,13 +119,14 @@ def verificar_login(username: str, password: str) -> dict:
     """
     Verifica as credenciais do usuário.
     Retorna dict com 'success', 'message', e dados do usuário.
+    Verifica também se o acesso está expirado.
     """
     try:
         conn = sqlite3.connect(DATABASE_PATH)
         cursor = conn.cursor()
         
         cursor.execute(
-            'SELECT id, username, password_hash, is_admin FROM users WHERE username = ?',
+            'SELECT id, username, password_hash, is_admin, access_expires FROM users WHERE username = ?',
             (username,)
         )
         user = cursor.fetchone()
@@ -127,11 +135,20 @@ def verificar_login(username: str, password: str) -> dict:
             conn.close()
             return {'success': False, 'message': 'Usuário ou senha incorretos!'}
         
-        user_id, username, password_hash, is_admin = user
+        user_id, username, password_hash, is_admin, access_expires = user
         
         if not verify_password(password, password_hash):
             conn.close()
             return {'success': False, 'message': 'Usuário ou senha incorretos!'}
+        
+        # Verifica se o acesso expirou
+        if access_expires:
+            from datetime import datetime
+            expire_date = datetime.strptime(access_expires, '%Y-%m-%d')
+            now = datetime.now()
+            if expire_date < now:
+                conn.close()
+                return {'success': False, 'message': f'Acesso expirado em {access_expires}! Entre em contato com o administrador.'}
         
         # Atualiza último login
         cursor.execute(
@@ -147,7 +164,8 @@ def verificar_login(username: str, password: str) -> dict:
             'user': {
                 'id': user_id,
                 'username': username,
-                'is_admin': bool(is_admin)
+                'is_admin': bool(is_admin),
+                'access_expires': access_expires
             }
         }
     except Exception as e:
@@ -160,7 +178,7 @@ def listar_usuarios() -> list:
         conn = sqlite3.connect(DATABASE_PATH)
         cursor = conn.cursor()
         
-        cursor.execute('SELECT id, username, is_admin, created_at, last_login FROM users ORDER BY id')
+        cursor.execute('SELECT id, username, is_admin, created_at, last_login, access_expires FROM users ORDER BY id')
         users = cursor.fetchall()
         conn.close()
         
@@ -170,7 +188,8 @@ def listar_usuarios() -> list:
                 'username': u[1],
                 'is_admin': bool(u[2]),
                 'created_at': u[3],
-                'last_login': u[4]
+                'last_login': u[4],
+                'access_expires': u[5]
             }
             for u in users
         ]

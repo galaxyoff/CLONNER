@@ -16,8 +16,8 @@ subprocess.run(['chcp', '65001'], shell=True, capture_output=True)
 kernel32 = ctypes.windll.kernel32
 kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
 
-from downloader import download_file
-from parser_utils import extract_links
+from downloader import download_file, download_file_safe, get_all_resources_from_html
+from parser_utils import extract_links, get_resource_type
 from rewriter import rewrite_links
 
 
@@ -29,14 +29,22 @@ SERVER_URL = os.environ.get('ESTAGIARIO_SERVER', '').rstrip('/')
 AZUL = '\033[94m'
 VERDE = '\033[92m'
 VERMELHO = '\033[91m'
+AMARELO = '\033[93m'
 RESET = '\033[0m'
 
 def print_welcome():
     """Imprime a tela de boas-vindas"""
-    print("\n" + "="*50)
-    print("  ESTAGIARIO - FERRAMENTA DE CLONAGEM DE SITES")
-    print("="*50)
-    print(AZUL + "                    ESTAGIARIOX00" + RESET)
+    print("\n" + "="*60)
+    print("  ██████╗ ███████╗████████╗██████╗  ██████╗  █████╗ ██████╗ ██████╗ ")
+    print("  ██╔══██╗██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗██╔══██╗██╔══██╗██╔══██╗")
+    print("  ██████╔╝█████╗     ██║   ██████╔╝██║   ██║███████║██████╔╝██║  ██║")
+    print("  ██╔══██╗██╔══╝     ██║   ██╔══██╗██║   ██║██╔══██║██╔══██╗██║  ██║")
+    print("  ██║  ██║███████╗   ██║   ██║  ██║╚██████╔╝██║  ██║██║  ██║██████╔╝")
+    print("  ╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ")
+    print("="*60)
+    print(AZUL + "        FERRAMENTA PROFISSIONAL DE CLONAGEM DE SITES" + RESET)
+    print(AMARELO + "                    Versão 2.0" + RESET)
+    print("="*60 + "\n")
 
 
 def login():
@@ -44,23 +52,21 @@ def login():
     global SERVER_URL
     
     print("\n" + "="*40)
-    print("         TELA DE LOGIN")
+    print("         🔐 TELA DE LOGIN")
     print("="*40)
     
     # Se nao tem servidor configurado, pergunta
     if not SERVER_URL:
         print("\n🌐 Configure o servidor de autenticacao:")
-        SERVER_URL = input("URL do servidor (ex: http://seusite.com): ").strip().rstrip('/')
+        SERVER_URL = input("Digite a URL do servidor: ").strip().rstrip('/')
         if not SERVER_URL:
             print(VERMELHO + "✗ Servidor nao informado!" + RESET)
             return False
     
     usuario = input("Usuario: ").strip()
-    # getpass esconde os caracteres digitados no terminal
     senha = getpass.getpass("Senha: ")
     
     try:
-        # Faz login via API do servidor
         response = requests.post(
             f"{SERVER_URL}/api/login",
             data={'username': usuario, 'password': senha},
@@ -72,6 +78,10 @@ def login():
             if data.get('success'):
                 print(VERDE + "✓ Acesso permitido!" + RESET)
                 print(f"  Bem-vindo, {data['user']['username']}!")
+                
+                # Verificar se acesso expirou
+                if data['user'].get('access_expires'):
+                    print(f"  ⚠️  Acesso expira em: {data['user']['access_expires']}")
                 return True
             else:
                 print(VERMELHO + "✗ " + data.get('message', 'Login falhou') + RESET)
@@ -113,12 +123,13 @@ class SiteCloner:
         self.visited = set()
         self.to_visit = deque([self._normalize(start_url)])
         
-        # Track downloaded resources
+        # Recursos baixados
         self.downloaded_resources = set()
+        self.failed_downloads = []
 
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "EstagiarioBot/1.0 (+https://example.com)"
+            "User-Agent": "EstagiarioBot/2.0 (+https://estagiario.com.br)"
         })
 
         self._setup_robots(start_url)
@@ -150,20 +161,73 @@ class SiteCloner:
         except Exception:
             return True
 
+    def _download_resource(self, url):
+        """Baixa um recurso (imagem, CSS, JS, fonte, etc.)"""
+        if url in self.downloaded_resources:
+            return True
+            
+        try:
+            download_file(self.session, url, self.output_dir)
+            self.downloaded_resources.add(url)
+            return True
+        except Exception as e:
+            logging.warning(f"Erro ao baixar recurso {url}: {e}")
+            self.failed_downloads.append(url)
+            return False
+
     def _process(self, url):
+        """Processa uma URL - baixa a página e extrai links"""
         logging.info(f"Clonando {url}")
         self.visited.add(url)
 
         resp = self.session.get(url, timeout=15)
         resp.raise_for_status()
 
-        links, soup = extract_links(resp.text, url, self.domain)
-        soup = rewrite_links(soup, self.output_dir, self.domain)
-
-        # Save the downloaded file
         content_type = resp.headers.get("content-type", "")
         
-        # Get the file path using the same logic as download_file
+        # Se for HTML, processa normally
+        if "text/html" in content_type:
+            links, soup = extract_links(resp.text, url, self.domain)
+            soup = rewrite_links(soup, self.output_dir, self.domain)
+            
+            # Salvar HTML modificado
+            file_path = self._get_file_path(url)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(str(soup))
+            
+            # Baixar recursos encontrados na página
+            self._download_page_resources(resp.text, url)
+            
+            return links
+        else:
+            # Não é HTML, apenas baixar o arquivo
+            try:
+                download_file(self.session, url, self.output_dir)
+                self.downloaded_resources.add(url)
+            except Exception as e:
+                logging.warning(f"Erro ao baixar {url}: {e}")
+            
+            return []
+
+    def _download_page_resources(self, html, base_url):
+        """Baixa todos os recursos de uma página HTML"""
+        resources = get_all_resources_from_html(html, base_url, self.domain)
+        
+        logging.info(f"Baixando {len(resources)} recursos da página...")
+        
+        # Usar thread pool para baixar recursos em paralelo
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            futures = {executor.submit(self._download_resource, url): url for url in resources}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    url = futures[future]
+                    logging.warning(f"Erro ao baixar {url}: {e}")
+
+    def _get_file_path(self, url):
+        """Retorna o caminho do arquivo local para uma URL"""
         from urllib.parse import urlparse, quote_plus
         parsed_url = urlparse(url)
         path = parsed_url.path
@@ -173,30 +237,19 @@ class SiteCloner:
             qs = quote_plus(parsed_url.query, safe='')
             path = path.rstrip('/') + '_' + qs
         file_path = os.path.normpath(os.path.join(self.output_dir, path.lstrip("/")))
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        
-        if "text/html" in content_type:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(str(soup))
-        elif "text/css" in content_type:
-            from rewriter import _rewrite_css_urls
-            css_content = resp.text
-            rewritten_css = _rewrite_css_urls(css_content, self.output_dir, self.domain)
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(rewritten_css)
-
-        return links
+        return file_path
 
     def run(self):
         limit_msg = "sem limite" if self.max_pages is None else str(self.max_pages)
-        logging.info(f"Iniciando clonagem de {self.start_url} (limite: {limit_msg} paginas)")
+        logging.info(f"Iniciando clonagem de {self.start_url}")
+        logging.info(f"Limite: {limit_msg} paginas | Workers: {self.workers}")
         
         with ThreadPoolExecutor(max_workers=self.workers) as executor:
             while self.to_visit:
                 if self.max_pages is not None and len(self.visited) >= self.max_pages:
                     break
                     
-                # Collect URLs to process in this batch
+                # Coletar URLs para processar nesta tanda
                 urls_to_process = []
                 while self.to_visit and len(urls_to_process) < self.workers:
                     url = self.to_visit.popleft()
@@ -206,14 +259,13 @@ class SiteCloner:
                 if not urls_to_process:
                     break
                     
-                # Submit all URLs in parallel
+                # Processar URLs em paralelo
                 futures = {executor.submit(self._process, url): url for url in urls_to_process}
                 
-                # Process results and add new links to the queue
+                # Processar resultados e adicionar novos links
                 for future in as_completed(futures):
                     try:
                         links = future.result()
-                        # Add new links to the queue
                         if links:
                             for link in links:
                                 if link not in self.visited and self._allowed(link):
@@ -221,7 +273,16 @@ class SiteCloner:
                     except Exception as e:
                         logging.warning(f"Erro ao processar: {e}")
 
-        logging.info(f"Clonagem finalizada! Total de paginas clonadas: {len(self.visited)}")
+        # Resumo final
+        print("\n" + "="*50)
+        print("  📊 RESUMO DA CLONAGEM")
+        print("="*50)
+        print(f"  ✓ Paginas clonadas: {len(self.visited)}")
+        print(f"  ✓ Recursos baixados: {len(self.downloaded_resources)}")
+        if self.failed_downloads:
+            print(f"  ⚠️  Falhas: {len(self.failed_downloads)}")
+        print(f"  📁 Salvo em: {os.path.abspath(self.output_dir)}")
+        print("="*50 + "\n")
 
 
 def main():
@@ -237,7 +298,14 @@ def main():
     
     parser = argparse.ArgumentParser(
         prog="Estagiario",
-        description="Ferramenta de clonagem de sites"
+        description="Ferramenta profissional de clonagem de sites",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exemplos de uso:
+  estagiario https://exemplo.com
+  estagiario https://exemplo.com -o minha_pasta
+  estagiario https://exemplo.com -m 50 -w 8
+        """
     )
 
     parser.add_argument("url", nargs="?", default=None, help="URL inicial a ser clonada")
@@ -246,7 +314,7 @@ def main():
     parser.add_argument("-m", "--max", type=int, default=None,
                         help="Maximo de paginas (padrao: sem limite)")
     parser.add_argument("-w", "--workers", type=int, default=4,
-                        help="Numero de threads simultaneas")
+                        help="Numero de threads simultaneas (padrao: 4)")
     parser.add_argument("--admin", action="store_true",
                         help="Abrir painel admin web")
 
@@ -289,12 +357,13 @@ def main():
             except ValueError:
                 args.max = None
     
-    print(f"\n🚀 Preparando para clonar: {args.url}")
-    print(f"📁 Salvando em: {args.output}")
+    print(f"\n{AMARELO}🚀 Preparando para clonar:{RESET} {args.url}")
+    print(f"{VERDE}📁 Salvando em:{RESET} {args.output}")
     if args.max:
-        print(f"📄 Limite de paginas: {args.max}")
+        print(f"{AZUL}📄 Limite de paginas:{RESET} {args.max}")
     else:
-        print(f"📄 Limite: Site inteiro")
+        print(f"{AZUL}📄 Limite:{RESET} Site inteiro")
+    print(f"{AZUL}⚡ Workers:{RESET} {args.workers}")
     print("\n")
     
     cloner = SiteCloner(args.url, args.output, args.max, args.workers)
