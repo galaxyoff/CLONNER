@@ -7,12 +7,15 @@ import os
 import sys
 import secrets
 
+# Inicializa banco de dados antes de importar módulos Flask
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from flask import Flask, render_template_string, request, redirect, url_for, session, flash
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 import database
+
+# Inicializa o banco de dados
+database.init_db()
+database.criar_admin_padrao()
 
 # Configurações
 SECRET_KEY = os.environ.get('SECRET_KEY', secrets.token_hex(32))
@@ -21,9 +24,15 @@ RATE_LIMIT = os.environ.get('RATE_LIMIT', '100 per minute')
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
-# Rate Limiter
-limiter = Limiter(key_func=get_remote_address, default_limits=[RATE_LIMIT])
-limiter.init_app(app)
+# Rate Limiter - usa memória por padrão (funciona no Render)
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=[RATE_LIMIT],
+    app=app
+)
 
 # Template de Login
 LOGIN_TEMPLATE = """
@@ -97,14 +106,14 @@ LOGIN_TEMPLATE = """
             {% endif %}
         {% endwith %}
         
-        <form method="POST">
+        <form method="POST" action="/login">
             <div class="form-group">
                 <label>Usuário</label>
-                <input type="text" name="username" required>
+                <input type="text" name="username" required autocomplete="username">
             </div>
             <div class="form-group">
                 <label>Senha</label>
-                <input type="password" name="password" required>
+                <input type="password" name="password" required autocomplete="current-password">
             </div>
             <button type="submit">Entrar</button>
         </form>
@@ -123,7 +132,7 @@ def add_headers(response):
 
 
 @app.route('/')
-@limiter.limit("50 per minute")
+@app.route('/login')
 def index():
     """Página inicial com login"""
     if session.get('logged_in'):
@@ -132,7 +141,6 @@ def index():
 
 
 @app.route('/login', methods=['POST'])
-@limiter.limit("10 per minute")
 def login():
     """Processa login e redireciona para admin"""
     username = request.form.get('username', '').strip()
@@ -152,14 +160,13 @@ def login():
 
 @app.route('/admin')
 def admin():
-    """Painel Admin - redireciona para admin_panel"""
+    """Painel Admin"""
     if not session.get('logged_in'):
         return redirect(url_for('index'))
     
     users = database.listar_usuarios()
     admins = sum(1 for u in users if u['is_admin'])
     
-    # Template inline do admin
     ADMIN_PANEL = """
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -208,9 +215,9 @@ def admin():
             {% endwith %}
             
             <div class="stats">
-                <div class="stat-card"><div class="stat-number">{{ users|length }}</div><div>Total Usuários</div></div>
-                <div class="stat-card"><div class="stat-number">{{ admins }}</div><div>Administradores</div></div>
-                <div class="stat-card"><div class="stat-number">{{ users|length - admins }}</div><div>Usuários</div></div>
+                <div class="stat-card"><div class="stat-number">{{ users|length }}</div><div>Total Usuários</div>
+                <div class="stat-card"><div class="stat-number">{{ admins }}</div><div>Administradores</div>
+                <div class="stat-card"><div class="stat-number">{{ users|length - admins }}</div><div>Usuários</div>
             </div>
             
             <div class="box">
@@ -218,7 +225,7 @@ def admin():
                 <form method="POST" action="/admin/criar" style="margin-top: 15px;">
                     <div style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px;">
                         <input type="text" name="username" placeholder="Usuário" required>
-                        <input type="password" name="password" placeholder="Senha (mín. 8 caracteres)" required minlength="8">
+                        <input type="password" name="password" placeholder="Senha (mín. 8)" required minlength="8">
                         <button type="submit" class="btn">Criar</button>
                     </div>
                     <label style="margin-top: 10px; display: block;">
@@ -252,7 +259,6 @@ def admin():
                     </tbody>
                 </table>
             </div>
-        </div>
     </body>
     </html>
     """
@@ -261,7 +267,6 @@ def admin():
 
 
 @app.route('/admin/criar', methods=['POST'])
-@limiter.limit("20 per minute")
 def criar_usuario():
     if not session.get('logged_in'):
         return redirect(url_for('index'))
@@ -280,7 +285,6 @@ def criar_usuario():
 
 
 @app.route('/admin/deletar', methods=['POST'])
-@limiter.limit("20 per minute")
 def deletar_usuario():
     if not session.get('logged_in'):
         return redirect(url_for('index'))
@@ -297,13 +301,12 @@ def logout():
     return redirect(url_for('index'))
 
 
+# Error handlers
 @app.errorhandler(429)
 def ratelimit(e):
-    return "<h1>429 - Many Requests</h1><p>Too many requests. Try again later.</p>", 429
+    return "<h1>429 - Too Many Requests</h1><p>Try again later.</p>", 429
 
 
 if __name__ == '__main__':
-    database.init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-
