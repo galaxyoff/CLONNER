@@ -202,6 +202,16 @@ def admin():
 def criar_usuario():
     if not session.get('logged_in'):
         return redirect(url_for('index'))
+    
+    # Verifica se o usuário logado é admin
+    username = session.get('username')
+    users = database.listar_usuarios()
+    current_user = next((u for u in users if u['username'] == username), None)
+    
+    if not current_user or not current_user['is_admin']:
+        flash('Acesso negado! Apenas administradores podem criar usuários.', 'error')
+        return redirect(url_for('admin'))
+    
     username = request.form.get('username', '').strip()
     password = request.form.get('password', '')
     is_admin = request.form.get('is_admin') == '1'
@@ -213,6 +223,16 @@ def criar_usuario():
 def deletar_usuario():
     if not session.get('logged_in'):
         return redirect(url_for('index'))
+    
+    # Verifica se o usuário logado é admin
+    username_session = session.get('username')
+    users = database.listar_usuarios()
+    current_user = next((u for u in users if u['username'] == username_session), None)
+    
+    if not current_user or not current_user['is_admin']:
+        flash('Acesso negado! Apenas administradores podem deletar usuários.', 'error')
+        return redirect(url_for('admin'))
+    
     username = request.form.get('username', '').strip()
     result = database.deletar_usuario(username)
     flash(result['message'], 'success' if result['success'] else 'error')
@@ -222,6 +242,30 @@ def deletar_usuario():
 def logout():
     session.clear()
     return redirect(url_for('index'))
+
+
+# API para autenticação do cliente/desktop
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    """API para autenticação de clientes/desktop"""
+    username = request.form.get('username', '').strip()
+    password = request.form.get('password', '')
+    
+    result = database.verificar_login(username, password)
+    
+    if result['success']:
+        return {
+            'success': True,
+            'message': 'Login bem-sucedido!',
+            'user': {
+                'id': result['user']['id'],
+                'username': result['user']['username'],
+                'is_admin': result['user']['is_admin']
+            }
+        }
+    else:
+        return {'success': False, 'message': result['message']}, 401
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

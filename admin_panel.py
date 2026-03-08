@@ -413,7 +413,7 @@ def index():
 def login():
     """Processa o login no painel admin."""
     username = request.form.get('username', '').strip()
-    password = request.form.    
+    password = request.form.get('password', '')
     # Log de tentativa de login (sem expor informações sensíveis)
     logger.info(f"Tentativa de login para usuário: {username}")
     
@@ -440,12 +440,22 @@ def logout():
     return redirect(url_for('index'))
 
 
+
 @app.route('/admin/criar', methods=['POST'])
 @limiter.limit("20 per minute")
 def criar_usuario():
     """Cria um novo usuário."""
     if not session.get('logged_in'):
         flash('Você precisa estar logado!', 'error')
+        return redirect(url_for('index'))
+    
+    # Verifica se o usuário logado é admin
+    username_session = session.get('username')
+    users = database.listar_usuarios()
+    current_user = next((u for u in users if u['username'] == username_session), None)
+    
+    if not current_user or not current_user['is_admin']:
+        flash('Acesso negado! Apenas administradores podem criar usuários.', 'error')
         return redirect(url_for('index'))
     
     username = request.form.get('username', '').strip()
@@ -478,6 +488,15 @@ def deletar_usuario():
     """Deleta um usuário."""
     if not session.get('logged_in'):
         flash('Você precisa estar logado!', 'error')
+        return redirect(url_for('index'))
+    
+    # Verifica se o usuário logado é admin
+    username_session = session.get('username')
+    users = database.listar_usuarios()
+    current_user = next((u for u in users if u['username'] == username_session), None)
+    
+    if not current_user or not current_user['is_admin']:
+        flash('Acesso negado! Apenas administradores podem deletar usuários.', 'error')
         return redirect(url_for('index'))
     
     username = request.form.get('username', '').strip()

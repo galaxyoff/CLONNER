@@ -19,7 +19,10 @@ kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
 from downloader import download_file
 from parser_utils import extract_links
 from rewriter import rewrite_links
-import database
+
+
+# Configuracao do servidor (pode ser via variavel de ambiente ou perguntar ao usuario)
+SERVER_URL = os.environ.get('ESTAGIARIO_SERVER', '').rstrip('/')
 
 
 # ANSI color codes
@@ -37,24 +40,53 @@ def print_welcome():
 
 
 def login():
-    """Função de login para verificar acesso usando banco de dados"""
+    """Funcao de login para verificar acesso via API"""
+    global SERVER_URL
+    
     print("\n" + "="*40)
     print("         TELA DE LOGIN")
     print("="*40)
     
-    usuario = input("Usuário: ").strip()
+    # Se nao tem servidor configurado, pergunta
+    if not SERVER_URL:
+        print("\n🌐 Configure o servidor de autenticacao:")
+        SERVER_URL = input("URL do servidor (ex: http://seusite.com): ").strip().rstrip('/')
+        if not SERVER_URL:
+            print(VERMELHO + "✗ Servidor nao informado!" + RESET)
+            return False
+    
+    usuario = input("Usuario: ").strip()
     # getpass esconde os caracteres digitados no terminal
     senha = getpass.getpass("Senha: ")
     
-    # Verifica no banco de dados
-    resultado = database.verificar_login(usuario, senha)
-    
-    if resultado['success']:
-        print(VERDE + "✓ Acesso permitido!" + RESET)
-        print(f"  Bem-vindo, {resultado['user']['username']}!")
-        return True
-    else:
-        print(VERMELHO + "✗ " + resultado['message'] + RESET)
+    try:
+        # Faz login via API do servidor
+        response = requests.post(
+            f"{SERVER_URL}/api/login",
+            data={'username': usuario, 'password': senha},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('success'):
+                print(VERDE + "✓ Acesso permitido!" + RESET)
+                print(f"  Bem-vindo, {data['user']['username']}!")
+                return True
+            else:
+                print(VERMELHO + "✗ " + data.get('message', 'Login falhou') + RESET)
+                return False
+        else:
+            print(VERMELHO + "✗ Erro ao conectar com o servidor!" + RESET)
+            print(f"   Codigo: {response.status_code}")
+            return False
+            
+    except requests.exceptions.ConnectionError:
+        print(VERMELHO + "✗ Nao foi possivel conectar ao servidor!" + RESET)
+        print(f"   Verifique se {SERVER_URL} esta acessivel")
+        return False
+    except Exception as e:
+        print(VERMELHO + "✗ Erro: " + str(e) + RESET)
         return False
 
 
@@ -102,7 +134,7 @@ class SiteCloner:
         try:
             rp.read()
         except Exception:
-            logging.debug("robots.txt não pôde ser lido; ignorando")
+            logging.debug("robots.txt nao pode ser lido; ignorando")
         self.robots = rp
 
     def _normalize(self, url):
@@ -157,7 +189,7 @@ class SiteCloner:
 
     def run(self):
         limit_msg = "sem limite" if self.max_pages is None else str(self.max_pages)
-        logging.info(f"Iniciando clonagem de {self.start_url} (limite: {limit_msg} páginas)")
+        logging.info(f"Iniciando clonagem de {self.start_url} (limite: {limit_msg} paginas)")
         
         with ThreadPoolExecutor(max_workers=self.workers) as executor:
             while self.to_visit:
@@ -189,7 +221,7 @@ class SiteCloner:
                     except Exception as e:
                         logging.warning(f"Erro ao processar: {e}")
 
-        logging.info(f"Clonagem finalizada! Total de páginas clonadas: {len(self.visited)}")
+        logging.info(f"Clonagem finalizada! Total de paginas clonadas: {len(self.visited)}")
 
 
 def main():
@@ -200,7 +232,7 @@ def main():
     
     # Chamar login antes de qualquer coisa
     if not login():
-        print("Você precisa fazer login para usar a ferramenta.")
+        print("Voce precisa fazer login para usar a ferramenta.")
         sys.exit(1)
     
     parser = argparse.ArgumentParser(
@@ -210,11 +242,11 @@ def main():
 
     parser.add_argument("url", nargs="?", default=None, help="URL inicial a ser clonada")
     parser.add_argument("-o", "--output", default=None,
-                        help="Pasta de saída (padrão: output)")
+                        help="Pasta de saida (padrao: output)")
     parser.add_argument("-m", "--max", type=int, default=None,
-                        help="Máximo de páginas (padrão: sem limite)")
+                        help="Maximo de paginas (padrao: sem limite)")
     parser.add_argument("-w", "--workers", type=int, default=4,
-                        help="Número de threads simultâneas")
+                        help="Numero de threads simultaneas")
     parser.add_argument("--admin", action="store_true",
                         help="Abrir painel admin web")
 
@@ -225,32 +257,32 @@ def main():
         iniciar_painel_admin()
         return
     
-    # Se não passou URL como argumento, perguntar interativamente
+    # Se nao passou URL como argumento, perguntar interativamente
     if args.url is None:
         print_welcome()
         print("\n=== URL do Site ===")
         args.url = input("Digite a URL do site que deseja clonar: ").strip()
         if not args.url:
-            print("Erro: URL é obrigatória!")
+            print("Erro: URL e obrigatoria!")
             sys.exit(1)
         
-        # Adicionar http se não tiver
+        # Adicionar http se nao tiver
         if not args.url.startswith("http"):
             args.url = "https://" + args.url
     
     print_welcome()
     
     if args.output is None:
-        print("\n=== Configuração de Saída ===")
-        print(f"Padrão: output (na pasta atual)")
+        print("\n=== Configuracao de Saida ===")
+        print(f"Padrao: output (na pasta atual)")
         args.output = input("Digite o caminho onde deseja salvar o site: ").strip()
         if not args.output:
             args.output = "output"
     
     if args.max is None:
-        print("\n=== Configuração de Páginas ===")
-        print("Padrão: Clonar site inteiro (sem limite)")
-        limit_input = input("Digite o número máximo de páginas (deixe vazio para clonar tudo): ").strip()
+        print("\n=== Configuracao de Paginas ===")
+        print("Padrao: Clonar site inteiro (sem limite)")
+        limit_input = input("Digite o numero maximo de paginas (deixe vazio para clonar tudo): ").strip()
         if limit_input:
             try:
                 args.max = int(limit_input)
@@ -260,7 +292,7 @@ def main():
     print(f"\n🚀 Preparando para clonar: {args.url}")
     print(f"📁 Salvando em: {args.output}")
     if args.max:
-        print(f"📄 Limite de páginas: {args.max}")
+        print(f"📄 Limite de paginas: {args.max}")
     else:
         print(f"📄 Limite: Site inteiro")
     print("\n")
@@ -271,3 +303,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
