@@ -150,7 +150,6 @@ def verificar_login(username: str, password: str) -> dict:
         
         # Verifica se o acesso expirou
         if access_expires:
-            from datetime import datetime
             expire_date = datetime.strptime(access_expires, '%Y-%m-%d')
             now = datetime.now()
             if expire_date < now:
