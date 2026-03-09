@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
-Aplicação web - Versão simplificada para deploy
+Aplicação web - Versão profissional com interface de clonagem
 Integração com o painel admin profissional
 """
 import os
 import sys
+import threading
+import time
+import shutil
+import zipfile
+from datetime import datetime
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from flask import Flask, render_template_string, request, redirect, url_for, session, flash
+from flask import Flask, render_template_string, request, redirect, url_for, session, flash, jsonify, send_file
+from werkzeug.utils import secure_filename
 import database
 
 # Inicializa o banco de dados
@@ -17,6 +24,59 @@ database.criar_admin_padrao()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+# Configurações
+CLONES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clones')
+os.makedirs(CLONES_DIR, exist_ok=True)
+
+# Armazena tarefas de clonagem em andamento
+clone_tasks = {}  # {task_id: {'status': 'running'|'completed'|'error', 'progress': 0, 'message': '', 'output_dir': ''}}
+
+def get_user_clones_dir(username):
+    """Retorna o diretório de clones do usuário"""
+    user_dir = os.path.join(CLONES_DIR, secure_filename(username))
+    os.makedirs(user_dir, exist_ok=True)
+    return user_dir
+
+def run_clone_in_background(task_id, url, output_dir, max_pages, workers):
+    """Executa a clonagem em uma thread separada"""
+    try:
+        from estagiario import SiteCloner
+        
+        clone_tasks[task_id]['status'] = 'running'
+        clone_tasks[task_id]['message'] = 'Iniciando clonagem...'
+        
+        cloner = SiteCloner(url, output_dir, max_pages, workers)
+        
+        # Sobrescrever o método run para atualizar progresso
+        original_run = cloner.run
+        
+        def custom_run():
+            clone_tasks[task_id]['message'] = 'Clonando site...'
+            original_run()
+            clone_tasks[task_id]['status'] = 'completed'
+            clone_tasks[task_id]['message'] = 'Clonagem concluída!'
+            clone_tasks[task_id]['progress'] = 100
+        
+        cloner.run = custom_run
+        cloner.run()
+        
+        if clone_tasks[task_id]['status'] != 'completed':
+            clone_tasks[task_id]['status'] = 'completed'
+            clone_tasks[task_id]['message'] = 'Clonagem concluída!'
+            
+    except Exception as e:
+        clone_tasks[task_id]['status'] = 'error'
+        clone_tasks[task_id]['message'] = f'Erro: {str(e)}'
+
+def create_zip_from_directory(directory, zip_path):
+    """Cria um arquivo ZIP de um diretório"""
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, os.path.dirname(directory))
+                zipf.write(file_path, arcname)
 
 # Template de Login Profissional
 LOGIN_TEMPLATE = """
@@ -195,6 +255,10 @@ def admin():
     current_user = next((u for u in users if u['username'] == current_username), None)
     is_admin = current_user['is_admin'] if current_user else False
     
+    # Data atual para comparação de expiração
+    from datetime import datetime
+    today = datetime.now().strftime('%Y-%m-%d')
+    
     ADMIN_PANEL = """
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -203,6 +267,7 @@ def admin():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Painel - Estagiario</title>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+        <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
         <style>
             :root {
                 --primary: #1e3c72;
@@ -215,7 +280,7 @@ def admin():
                 min-height: 100vh;
                 padding: 20px;
             }
-            .container { max-width: 900px; margin: 0 auto; }
+            .container { max-width: 1200px; margin: 0 auto; }
             .card {
                 background: white;
                 border-radius: 16px;
@@ -259,6 +324,12 @@ def admin():
                 padding: 8px 16px;
                 font-size: 13px;
             }
+            .btn-success {
+                background: #10b981;
+                color: white;
+                padding: 8px 16px;
+                font-size: 13px;
+            }
             .stats {
                 display: grid;
                 grid-template-columns: repeat(3, 1fr);
@@ -294,14 +365,16 @@ def admin():
             }
             .badge-admin { background: #f59e0b; color: white; }
             .badge-user { background: #3b82f6; color: white; }
+            .badge-expired { background: #ef4444; color: white; }
+            .badge-active { background: #10b981; color: white; }
             .form-group { margin-bottom: 20px; }
             .form-row {
                 display: grid;
-                grid-template-columns: 1fr 1fr auto;
+                grid-template-columns: 1fr 1fr 1fr auto;
                 gap: 16px;
                 align-items: end;
             }
-            input {
+            input, select {
                 width: 100%;
                 padding: 12px;
                 border: 2px solid #e5e7eb;
@@ -340,14 +413,73 @@ def admin():
             }
             .user-panel h2 { color: var(--primary); margin-bottom: 10px; }
             .user-panel p { color: #6b7280; margin-bottom: 30px; }
-            .instructions {
+            
+            /* Clone Form */
+            .clone-form {
                 background: #f3f4f6;
-                padding: 20px;
+                padding: 24px;
                 border-radius: 12px;
-                text-align: left;
+                margin-top: 20px;
             }
-            .instructions h4 { color: var(--primary); margin-bottom: 12px; }
-            .instructions ul { padding-left: 20px; color: #374151; line-height: 1.8; }
+            .clone-form h3 {
+                color: var(--primary);
+                margin-bottom: 16px;
+            }
+            .clone-input-group {
+                display: grid;
+                grid-template-columns: 2fr 1fr 1fr auto;
+                gap: 12px;
+                align-items: end;
+            }
+            .progress-container {
+                margin-top: 20px;
+                display: none;
+            }
+            .progress-bar {
+                width: 100%;
+                height: 8px;
+                background: #e5e7eb;
+                border-radius: 4px;
+                overflow: hidden;
+            }
+            .progress-fill {
+                height: 100%;
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                width: 0%;
+                transition: width 0.3s;
+            }
+            .progress-text {
+                margin-top: 8px;
+                font-size: 13px;
+                color: #6b7280;
+            }
+            
+            /* Clones History */
+            .clones-list {
+                margin-top: 30px;
+            }
+            .clone-item {
+                background: white;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                padding: 16px;
+                margin-bottom: 12px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .clone-item-info h4 {
+                color: var(--primary);
+                margin-bottom: 4px;
+            }
+            .clone-item-info p {
+                font-size: 13px;
+                color: #6b7280;
+            }
+            .clone-actions {
+                display: flex;
+                gap: 8px;
+            }
         </style>
     </head>
     <body>
@@ -391,12 +523,16 @@ def admin():
                                 <label>Senha</label>
                                 <input type="password" name="password" required minlength="8" placeholder="Mínimo 8 caracteres">
                             </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label>Expira em</label>
+                                <input type="date" name="access_expires" placeholder="Sem expiração">
+                            </div>
                             <button type="submit" class="btn btn-primary">Criar</button>
                         </div>
                     </form>
                     <h3 style="margin-bottom: 16px; color: var(--primary);">📋 Usuários</h3>
                     <table>
-                        <thead><tr><th>ID</th><th>Usuário</th><th>Tipo</th><th>Criado em</th><th>Ações</th></tr></thead>
+                        <thead><tr><th>ID</th><th>Usuário</th><th>Tipo</th><th>Criado em</th><th>Expira em</th><th>Status</th><th>Ações</th></tr></thead>
                         <tbody>
                             {% for user in users %}
                             <tr>
@@ -404,6 +540,18 @@ def admin():
                                 <td><strong>{{ user.username }}</strong></td>
                                 <td><span class="badge {% if user.is_admin %}badge-admin{% else %}badge-user{% endif %}">{% if user.is_admin %}Admin{% else %}User{% endif %}</span></td>
                                 <td>{{ user.created_at }}</td>
+                                <td>{{ user.access_expires or 'Nunca' }}</td>
+                                <td>
+                                    {% if user.access_expires %}
+                                        {% if user.access_expires < '""" + today + """' %}
+                                        <span class="badge badge-expired">Expirado</span>
+                                        {% else %}
+                                        <span class="badge badge-active">Ativo</span>
+                                        {% endif %}
+                                    {% else %}
+                                    <span class="badge badge-active">Ativo</span>
+                                    {% endif %}
+                                </td>
                                 <td>
                                     {% if user.username != 'admin' or admins > 1 %}
                                     <form method="POST" action="/admin/deletar" style="display:inline;">
@@ -419,28 +567,143 @@ def admin():
                 </div>
             </div>
             {% else %}
+            <!-- Painel do Usuário Comum com Interface de Clonagem -->
             <div class="card">
                 <div class="card-header">
-                    <h1>🎯 Área do Usuário</h1>
+                    <h1>🕷️ Clonador de Sites - Estagiário</h1>
                     <a href="/logout" class="btn btn-logout">Sair</a>
                 </div>
                 <div class="card-body">
-                    <div class="user-panel">
-                        <div class="user-icon">👤</div>
-                        <h2>Bem-vindo, {{ session.get('username') }}!</h2>
-                        <p>Você tem acesso à ferramenta de clonagem.</p>
-                        <div class="instructions">
-                            <h4>📌 Como usar:</h4>
-                            <ul>
-                                <li>Execute o programa Estagiario.exe</li>
-                                <li>Faça login com suas credenciais</li>
-                                <li>Digite a URL do site que deseja clonar</li>
-                                <li>Escolha o local para salvar os arquivos</li>
-                            </ul>
+                    <div class="user-panel" style="padding: 0; text-align: left; margin-bottom: 30px;">
+                        <h2>Bem-vindo, {{ session.get('username') }}! 👋</h2>
+                        <p>Cole a URL do site que deseja clonar e clique em iniciar.</p>
+                    </div>
+                    
+                    <div class="clone-form">
+                        <h3>🚀 Nova Clonagem</h3>
+                        <form id="cloneForm">
+                            <div class="clone-input-group">
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label>URL do Site</label>
+                                    <input type="url" id="cloneUrl" name="url" required placeholder="https://exemplo.com">
+                                </div>
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label>Limite de Páginas</label>
+                                    <input type="number" id="cloneMax" name="max_pages" value="50" min="1" max="500">
+                                </div>
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label>Workers</label>
+                                    <select id="cloneWorkers" name="workers">
+                                        <option value="2">2</option>
+                                        <option value="4" selected>4</option>
+                                        <option value="8">8</option>
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-primary" id="cloneBtn">Clonar</button>
+                            </div>
+                        </form>
+                        
+                        <div class="progress-container" id="progressContainer">
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="progressFill"></div>
+                            </div>
+                            <p class="progress-text" id="progressText">Iniciando...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="clones-list">
+                        <h3 style="margin-bottom: 16px; color: var(--primary);">📂 Meus Clones</h3>
+                        <div id="clonesList">
+                            <p style="color: #6b7280; text-align: center; padding: 20px;">Nenhum clone realizado ainda.</p>
                         </div>
                     </div>
                 </div>
             </div>
+            
+            <script>
+                let currentTaskId = null;
+                let checkInterval = null;
+                
+                document.getElementById('cloneForm').addEventListener('submit', async function(e) {
+                    e.preventDefault();
+                    
+                    const url = document.getElementById('cloneUrl').value;
+                    const maxPages = document.getElementById('cloneMax').value;
+                    const workers = document.getElementById('cloneWorkers').value;
+                    
+                    const btn = document.getElementById('cloneBtn');
+                    const progressContainer = document.getElementById('progressContainer');
+                    const progressFill = document.getElementById('progressFill');
+                    const progressText = document.getElementById('progressText');
+                    
+                    btn.disabled = true;
+                    btn.textContent = 'Clonando...';
+                    progressContainer.style.display = 'block';
+                    progressFill.style.width = '30%';
+                    progressText.textContent = 'Enviando requisição...';
+                    
+                    try {
+                        const response = await fetch('/api/clone/start', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                url: url,
+                                max_pages: parseInt(maxPages),
+                                workers: parseInt(workers)
+                            })
+                        });
+                        
+                        const data = await response.json();
+                        
+                        if (data.success) {
+                            currentTaskId = data.task_id;
+                            progressFill.style.width = '50%';
+                            progressText.textContent = 'Clonagem em andamento...';
+                            
+                            // Verificar progresso a cada 2 segundos
+                            checkInterval = setInterval(async () => {
+                                const statusResponse = await fetch('/api/clone/status/' + currentTaskId);
+                                const statusData = await statusResponse.json();
+                                
+                                if (statusData.status === 'completed') {
+                                    clearInterval(checkInterval);
+                                    progressFill.style.width = '100%';
+                                    progressText.textContent = '✅ Clonagem concluída!';
+                                    btn.disabled = false;
+                                    btn.textContent = 'Clonar Novamente';
+                                    
+                                    Swal.fire({
+                                        title: 'Sucesso!',
+                                        text: 'Site clonado com sucesso!',
+                                        icon: 'success',
+                                        confirmButtonText: 'Baixar ZIP'
+                                    }).then(() => {
+                                        window.location.href = '/api/clone/download/' + currentTaskId;
+                                    });
+                                } else if (statusData.status === 'error') {
+                                    clearInterval(checkInterval);
+                                    progressFill.style.width = '100%';
+                                    progressFill.style.background = '#ef4444';
+                                    progressText.textContent = '❌ Erro: ' + statusData.message;
+                                    btn.disabled = false;
+                                    btn.textContent = 'Tentar Novamente';
+                                } else {
+                                    progressText.textContent = statusData.message || 'Clonando...';
+                                }
+                            }, 2000);
+                        } else {
+                            throw new Error(data.message);
+                        }
+                    } catch (error) {
+                        Swal.fire('Erro', error.message, 'error');
+                        btn.disabled = false;
+                        btn.textContent = 'Clonar';
+                        progressContainer.style.display = 'none';
+                    }
+                });
+            </script>
             {% endif %}
         </div>
     </body>
@@ -464,7 +727,10 @@ def criar_usuario():
     username = request.form.get('username', '').strip()
     password = request.form.get('password', '')
     is_admin = request.form.get('is_admin') == '1'
-    result = database.criar_usuario(username, password, is_admin)
+    access_expires = request.form.get('access_expires', '').strip()
+    access_expires = access_expires if access_expires else None
+    
+    result = database.criar_usuario(username, password, is_admin, access_expires)
     flash(result['message'], 'success' if result['success'] else 'error')
     return redirect(url_for('admin'))
 
@@ -514,6 +780,161 @@ def api_login():
         }
     else:
         return {'success': False, 'message': result['message']}, 401
+
+
+# API de Clonagem
+@app.route('/api/clone/start', methods=['POST'])
+def clone_start():
+    """Inicia uma nova clonagem"""
+    # Verificar autenticação
+    if not session.get('logged_in'):
+        return jsonify({'success': False, 'message': 'Não autenticado'}), 401
+    
+    data = request.get_json()
+    url = data.get('url', '').strip()
+    max_pages = data.get('max_pages', 50)
+    workers = data.get('workers', 4)
+    
+    if not url:
+        return jsonify({'success': False, 'message': 'URL não fornecida'}), 400
+    
+    # Adicionar http se não tiver
+    if not url.startswith('http'):
+        url = 'https://' + url
+    
+    # Validar URL
+    try:
+        parsed = urlparse(url)
+        if not parsed.netloc:
+            return jsonify({'success': False, 'message': 'URL inválida'}), 400
+    except Exception:
+        return jsonify({'success': False, 'message': 'URL inválida'}), 400
+    
+    username = session.get('username')
+    
+    # Criar diretório de saída
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    domain = urlparse(url).netloc.replace(':', '_').replace('.', '_')
+    output_dir = os.path.join(get_user_clones_dir(username), f"{domain}_{timestamp}")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Criar task ID
+    task_id = f"{username}_{timestamp}"
+    
+    # Inicializar task
+    clone_tasks[task_id] = {
+        'status': 'pending',
+        'progress': 0,
+        'message': 'Aguardando...',
+        'output_dir': output_dir,
+        'url': url,
+        'username': username
+    }
+    
+    # Executar em background
+    thread = threading.Thread(
+        target=run_clone_in_background,
+        args=(task_id, url, output_dir, max_pages, workers)
+    )
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({
+        'success': True,
+        'message': 'Clonagem iniciada',
+        'task_id': task_id
+    })
+
+
+@app.route('/api/clone/status/<task_id>', methods=['GET'])
+def clone_status(task_id):
+    """Verifica o status de uma clonagem"""
+    if not session.get('logged_in'):
+        return jsonify({'success': False, 'message': 'Não autenticado'}), 401
+    
+    if task_id not in clone_tasks:
+        return jsonify({'success': False, 'message': 'Task não encontrada'}), 404
+    
+    task = clone_tasks[task_id]
+    
+    # Verificar se a task pertence ao usuário
+    username = session.get('username')
+    if task['username'] != username:
+        return jsonify({'success': False, 'message': 'Acesso negado'}), 403
+    
+    return jsonify({
+        'success': True,
+        'status': task['status'],
+        'progress': task['progress'],
+        'message': task['message']
+    })
+
+
+@app.route('/api/clone/download/<task_id>', methods=['GET'])
+def clone_download(task_id):
+    """Baixa o resultado da clonagem como ZIP"""
+    if not session.get('logged_in'):
+        return redirect(url_for('index'))
+    
+    if task_id not in clone_tasks:
+        flash('Clone não encontrado', 'error')
+        return redirect(url_for('admin'))
+    
+    task = clone_tasks[task_id]
+    
+    # Verificar se a task pertence ao usuário
+    username = session.get('username')
+    if task['username'] != username:
+        flash('Acesso negado', 'error')
+        return redirect(url_for('admin'))
+    
+    output_dir = task['output_dir']
+    
+    if not os.path.exists(output_dir):
+        flash('Diretório não encontrado', 'error')
+        return redirect(url_for('admin'))
+    
+    # Criar ZIP
+    zip_filename = f"clone_{task['url'].replace('https://', '').replace('http://', '').replace('.', '_')}.zip"
+    zip_path = os.path.join(CLONES_DIR, f"{task_id}.zip")
+    
+    try:
+        create_zip_from_directory(output_dir, zip_path)
+        return send_file(zip_path, as_attachment=True, download_name=zip_filename)
+    except Exception as e:
+        flash(f'Erro ao criar ZIP: {str(e)}', 'error')
+        return redirect(url_for('admin'))
+
+
+@app.route('/api/clone/list', methods=['GET'])
+def clone_list():
+    """Lista os clones do usuário"""
+    if not session.get('logged_in'):
+        return jsonify({'success': False, 'message': 'Não autenticado'}), 401
+    
+    username = session.get('username')
+    user_clones_dir = get_user_clones_dir(username)
+    
+    clones = []
+    if os.path.exists(user_clones_dir):
+        for item in os.listdir(user_clones_dir):
+            item_path = os.path.join(user_clones_dir, item)
+            if os.path.isdir(item_path):
+                # Verificar se tem arquivos
+                files_count = sum(len(files) for _, _, files in os.walk(item_path))
+                clones.append({
+                    'name': item,
+                    'path': item_path,
+                    'files_count': files_count
+                })
+    
+    # Ordenar por data (mais recente primeiro)
+    clones.sort(key=lambda x: os.path.getmtime(x['path']), reverse=True)
+    
+    return jsonify({
+        'success': True,
+        'clones': clones
+    })
 
 
 if __name__ == '__main__':
