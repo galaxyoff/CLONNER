@@ -41,30 +41,220 @@ def get_user_clones_dir(username):
 def run_clone_in_background(task_id, url, output_dir, max_pages, workers):
     """Executa a clonagem em uma thread separada"""
     try:
-        from estagiario import SiteCloner
+        # Importações que não dependem de ctypes do Windows
+        import requests
+        from urllib.parse import urlparse, urljoin
+        from urllib import robotparser
+        from collections import deque
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import logging
+        import os
         
         clone_tasks[task_id]['status'] = 'running'
         clone_tasks[task_id]['message'] = 'Iniciando clonagem...'
         
-        cloner = SiteCloner(url, output_dir, max_pages, workers)
+        # Configuração inicial
+        parsed = urlparse(url)
+        domain = parsed.netloc
         
-        # Sobrescrever o método run para atualizar progresso
-        original_run = cloner.run
+        logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
         
-        def custom_run():
-            clone_tasks[task_id]['message'] = 'Clonando site...'
-            original_run()
-            clone_tasks[task_id]['status'] = 'completed'
-            clone_tasks[task_id]['message'] = 'Clonagem concluída!'
-            clone_tasks[task_id]['progress'] = 100
+        session = requests.Session()
+        session.headers.update({"User-Agent": "EstagiarioBot/2.0 (+https://estagiario.com.br)"})
         
-        cloner.run = custom_run
-        cloner.run()
+        # Setup robots.txt
+        rp = robotparser.RobotFileParser()
+        try:
+            rp.set_url(urljoin(url, "/robots.txt"))
+            rp.read()
+        except Exception:
+            pass
+        robots = rp
         
-        if clone_tasks[task_id]['status'] != 'completed':
-            clone_tasks[task_id]['status'] = 'completed'
-            clone_tasks[task_id]['message'] = 'Clonagem concluída!'
+        visited = set()
+        to_visit = deque([url])
+        downloaded_resources = set()
+        
+        def normalize_url(url):
+            parsed = urlparse(url)
+            clean = parsed._replace(fragment="").geturl()
+            if clean.endswith("/") and not clean == urljoin(clean, "/"):
+                clean = clean.rstrip("/")
+            return clean
+        
+        def allowed(url):
+            try:
+                return robots.can_fetch("*", url)
+            except Exception:
+                return True
+        
+        def get_file_path(url):
+            parsed_url = urlparse(url)
+            path = parsed_url.path
+            if path.endswith("/") or path == "":
+                path += "index.html"
+            file_path = os.path.normpath(os.path.join(output_dir, path.lstrip("/")))
+            return file_path
+        
+        def download_resource(resource_url):
+            try:
+                if resource_url in downloaded_resources:
+                    return True
+                resp = session.get(resource_url, timeout=15)
+                resp.raise_for_status()
+                
+                content_type = resp.headers.get("content-type", "")
+                
+                # Determinar extensão do arquivo
+                ext = ''
+                if 'text/html' in content_type:
+                    ext = '.html'
+                elif 'text/css' in content_type:
+                    ext = '.css'
+                elif 'javascript' in content_type:
+                    ext = '.js'
+                elif 'image' in content_type:
+                    ext = os.path.splitext(resource_url)[1] or '.img'
+                
+                file_path = get_file_path(resource_url)
+                if ext and not file_path.endswith(ext):
+                    file_path += ext
+                
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, 'wb') as f:
+                    f.write(resp.content)
+                
+                downloaded_resources.add(resource_url)
+                return True
+            except Exception as e:
+                logging.warning(f"Erro ao baixar {resource_url}: {e}")
+                return False
+        
+        def extract_resources(html, base_url, domain):
+            """Extrai links e recursos de uma página HTML"""
+            from bs4 import BeautifulSoup
+            resources = []
             
+            try:
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Scripts
+                for script in soup.find_all('script', src=True):
+                    src = script.get('src', '')
+                    if src:
+                        if src.startswith('//'):
+                            src = 'https:' + src
+                        elif src.startswith('/'):
+                            src = urljoin(base_url, src)
+                        elif not src.startswith('http'):
+                            src = urljoin(base_url, src)
+                        if src.startswith('http'):
+                            resources.append(src)
+                
+                # CSS
+                for link in soup.find_all('link', href=True):
+                    href = link.get('href', '')
+                    if href and ('.css' in href or 'stylesheet' in link.get('rel', [])):
+                        if href.startswith('//'):
+                            href = 'https:' + href
+                        elif href.startswith('/'):
+                            href = urljoin(base_url, href)
+                        elif not href.startswith('http'):
+                            href = urljoin(base_url, href)
+                        if href.startswith('http'):
+                            resources.append(href)
+                
+                # Imagens
+                for img in soup.find_all('img', src=True):
+                    src = img.get('src', '')
+                    if src:
+                        if src.startswith('//'):
+                            src = 'https:' + src
+                        elif src.startswith('/'):
+                            src = urljoin(base_url, src)
+                        elif not src.startswith('http'):
+                            src = urljoin(base_url, src)
+                        if src.startswith('http'):
+                            resources.append(src)
+                
+                # Links (para爬虫)
+                links = []
+                for a in soup.find_all('a', href=True):
+                    href = a.get('href', '')
+                    if href and not href.startswith('#') and not href.startswith('javascript'):
+                        if href.startswith('//'):
+                            href = 'https:' + href
+                        elif href.startswith('/'):
+                            href = urljoin(base_url, href)
+                        elif not href.startswith('http'):
+                            href = urljoin(base_url, href)
+                        if href.startswith('http') and domain in href:
+                            links.append(href)
+                
+                return list(set(links)), list(set(resources))
+            except Exception as e:
+                logging.warning(f"Erro ao extrair recursos: {e}")
+                return [], []
+        
+        clone_tasks[task_id]['message'] = 'Clonando site...'
+        
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            while to_visit:
+                if max_pages is not None and len(visited) >= max_pages:
+                    break
+                
+                urls_to_process = []
+                while to_visit and len(urls_to_process) < workers:
+                    url_to_process = to_visit.popleft()
+                    if url_to_process not in visited and allowed(url_to_process):
+                        urls_to_process.append(url_to_process)
+                
+                if not urls_to_process:
+                    break
+                
+                # Processar URLs
+                futures = {}
+                for url_to_process in urls_to_process:
+                    clone_tasks[task_id]['message'] = f'Processando {url_to_process[:50]}...'
+                    
+                    try:
+                        resp = session.get(url_to_process, timeout=15)
+                        resp.raise_for_status()
+                        
+                        content_type = resp.headers.get("content-type", "")
+                        
+                        if "text/html" in content_type:
+                            links, page_resources = extract_resources(resp.text, url_to_process, domain)
+                            
+                            # Baixar recursos da página
+                            for resource in page_resources:
+                                executor.submit(download_resource, resource)
+                            
+                            # Salvar HTML
+                            file_path = get_file_path(url_to_process)
+                            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(resp.text)
+                            
+                            visited.add(url_to_process)
+                            
+                            # Adicionar novos links
+                            for link in links:
+                                if link not in visited:
+                                    to_visit.append(link)
+                        else:
+                            # Baixar arquivo não-HTML
+                            download_resource(url_to_process)
+                            visited.add(url_to_process)
+                            
+                    except Exception as e:
+                        logging.warning(f"Erro ao processar {url_to_process}: {e}")
+                        visited.add(url_to_process)
+        
+        clone_tasks[task_id]['status'] = 'completed'
+        clone_tasks[task_id]['message'] = f'Clonagem concluída! {len(visited)} páginas'
+        clone_tasks[task_id]['progress'] = 100
+        
     except Exception as e:
         clone_tasks[task_id]['status'] = 'error'
         clone_tasks[task_id]['message'] = f'Erro: {str(e)}'
@@ -427,7 +617,7 @@ def admin():
             }
             .clone-input-group {
                 display: grid;
-                grid-template-columns: 2fr 1fr 1fr auto;
+                grid-template-columns: 1.5fr 1fr 1fr 1fr auto;
                 gap: 12px;
                 align-items: end;
             }
